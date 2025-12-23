@@ -1,9 +1,11 @@
 /**
  * Booking Model
  *
- * Defines the Booking entity structure and provides in-memory storage.
+ * Defines the Booking entity structure using Mongoose ODM.
  * Bookings represent reservations for homestays or guide services.
  */
+
+import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 
 /**
  * Type of listing being booked.
@@ -56,11 +58,10 @@ export interface BookingPricing {
 /**
  * Complete Booking entity interface.
  */
-export interface Booking {
-	_id: string;
+export interface IBooking {
 	bookingNumber: string;
 	listingType: ListingType;
-	listingId: string;
+	listingId: Types.ObjectId | string;
 	listingTitle?: string;
 	checkIn: Date;
 	checkOut: Date;
@@ -76,6 +77,11 @@ export interface Booking {
 	createdAt: Date;
 	updatedAt: Date;
 }
+
+/**
+ * Booking document type (includes Mongoose Document properties).
+ */
+export interface IBookingDocument extends IBooking, Document {}
 
 /**
  * Input type for creating a new booking.
@@ -99,24 +105,148 @@ export interface CancelBookingInput {
 	reason?: string;
 }
 
-/**
- * In-memory storage for bookings.
- * In production, this would be replaced by a database.
- */
-export const bookingsStore: Booking[] = [];
+// ============================================================================
+// Mongoose Schemas
+// ============================================================================
 
 /**
- * Counter for generating booking numbers.
+ * Guest count subdocument schema.
  */
-let bookingCounter = 1000;
+const guestCountSchema = new Schema({
+	adults: { type: Number, required: true, min: 1 },
+	children: { type: Number, required: false, default: 0 },
+	total: { type: Number, required: false }
+}, { _id: false });
 
 /**
- * Generates a unique booking number.
- *
- * @returns Formatted booking number (e.g., "JY-2025-001234")
+ * Guest details subdocument schema.
  */
-export function generateBookingNumber(): string {
-	bookingCounter++;
-	const year = new Date().getFullYear();
-	return `JY-${year}-${String(bookingCounter).padStart(6, '0')}`;
-}
+const guestDetailsSchema = new Schema({
+	name: { type: String, required: true, trim: true },
+	email: { type: String, required: true, trim: true, lowercase: true },
+	phone: { type: String, required: true, trim: true }
+}, { _id: false });
+
+/**
+ * Pricing subdocument schema.
+ */
+const pricingSchema = new Schema({
+	basePrice: { type: Number, required: true, min: 0 },
+	cleaningFee: { type: Number, required: false },
+	serviceFee: { type: Number, required: false },
+	taxes: { type: Number, required: false },
+	total: { type: Number, required: true, min: 0 }
+}, { _id: false });
+
+/**
+ * Main Booking schema.
+ */
+const bookingSchema = new Schema<IBookingDocument>({
+	bookingNumber: {
+		type: String,
+		required: true,
+		unique: true,
+		index: true
+	},
+	listingType: {
+		type: String,
+		enum: ['homestay', 'guide'],
+		required: true
+	},
+	listingId: {
+		type: Schema.Types.ObjectId,
+		required: true,
+		refPath: 'listingType' // Dynamic reference based on listingType
+	},
+	listingTitle: {
+		type: String,
+		required: false
+	},
+	checkIn: {
+		type: Date,
+		required: true
+	},
+	checkOut: {
+		type: Date,
+		required: true
+	},
+	nights: {
+		type: Number,
+		required: false
+	},
+	guests: {
+		type: guestCountSchema,
+		required: true
+	},
+	guestDetails: {
+		type: guestDetailsSchema,
+		required: true
+	},
+	specialRequests: {
+		type: String,
+		required: false
+	},
+	pricing: {
+		type: pricingSchema,
+		required: true
+	},
+	status: {
+		type: String,
+		enum: ['pending', 'confirmed', 'cancelled', 'completed'],
+		default: 'pending'
+	},
+	paymentStatus: {
+		type: String,
+		enum: ['pending', 'completed', 'refunded', 'failed'],
+		default: 'pending'
+	},
+	cancellationReason: {
+		type: String,
+		required: false
+	},
+	cancelledAt: {
+		type: Date,
+		required: false
+	}
+}, {
+	timestamps: true,
+	collection: 'bookings'
+});
+
+// ============================================================================
+// Indexes
+// ============================================================================
+
+bookingSchema.index({ listingId: 1, checkIn: 1, checkOut: 1 });
+bookingSchema.index({ status: 1 });
+bookingSchema.index({ 'guestDetails.email': 1 });
+bookingSchema.index({ createdAt: -1 }); // For sorting by newest first
+
+// ============================================================================
+// Pre-save Middleware
+// ============================================================================
+
+/**
+ * Calculate nights and total guests before saving.
+ */
+bookingSchema.pre('save', function() {
+	// Calculate nights if not set
+	if (!this.nights && this.checkIn && this.checkOut) {
+		const diffTime = this.checkOut.getTime() - this.checkIn.getTime();
+		this.nights = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+	}
+
+	// Calculate total guests if not set
+	if (this.guests && !this.guests.total) {
+		this.guests.total = this.guests.adults + (this.guests.children || 0);
+	}
+});
+
+// ============================================================================
+// Model Export
+// ============================================================================
+
+/**
+ * Booking Mongoose model.
+ */
+export const BookingModel: Model<IBookingDocument> = mongoose.model<IBookingDocument>('Booking', bookingSchema);
